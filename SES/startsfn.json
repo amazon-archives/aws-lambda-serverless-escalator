@@ -1,0 +1,15 @@
+{
+    "Name": "startsfn",
+    "TlsPolicy": "Optional",
+    "ScanEnabled": false,
+    "Recipients": [SESDomain],
+    "Enabled": true,
+    "Actions": [
+        {
+            "LambdaAction": {
+                "InvocationType": "Event",
+                "FunctionArn": IncomingEmailARN
+            }
+        }
+    ]
+}

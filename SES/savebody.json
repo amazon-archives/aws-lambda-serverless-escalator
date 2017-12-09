@@ -1,0 +1,15 @@
+{
+    "Actions": [
+        {
+            "S3Action": {
+                "BucketName": EscalatorBucket,
+                "ObjectKeyPrefix": "incoming"
+            }
+        }
+    ],
+    "Enabled": true,
+    "Recipients": [SESDomain],
+    "TlsPolicy": "Optional",
+    "ScanEnabled": false,
+    "Name": "savebody"
+}

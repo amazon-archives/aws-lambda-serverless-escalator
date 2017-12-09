@@ -1,0 +1,42 @@
+# Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Amazon Software License (the "License"). You may not use this file except in
+# compliance with the License. A copy of the License is located at
+#
+#     http://aws.amazon.com/asl/
+#
+# or in the "license" file accompanying this file. This file is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - pip install --upgrade awscli
+  build:
+    commands:
+      - aws cloudformation package --template-file escalator-sam.yaml --s3-bucket $BUCKET
+          --s3-prefix escalator/$CODEBUILD_BUILD_ID --output-template-file escalator-packaged.yaml
+  post_build:
+    commands:
+      - "aws s3 cp escalatorapi.yaml s3://$BUCKET/escalator/$CODEBUILD_BUILD_ID/escalatorapi.yaml"
+      - |
+        cat << EOF > escalator-params.json
+        {
+          "Parameters" : {
+            "Domain" : "$DOMAIN",
+            "Env" : "$BUILD_ENV",
+            "SESDomain" : "$SESDOMAIN",
+            "EscalatorAPIURI" : "s3://$BUCKET/escalator/$CODEBUILD_BUILD_ID/escalatorapi.yaml",
+            "Route53Zone" : "$ROUTE53ZONEID",
+            "DomainCertArn" : "$DOMAINCERTARN"
+          }
+        }
+        EOF
+
+artifacts:
+  files:
+    - escalator-packaged.yaml
+    - escalator-params.json

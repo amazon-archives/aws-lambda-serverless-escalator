@@ -1,0 +1,404 @@
+# Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Amazon Software License (the "License"). You may not use this file except in
+# compliance with the License. A copy of the License is located at
+#
+#     http://aws.amazon.com/asl/
+#
+# or in the "license" file accompanying this file. This file is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: ESCALATOR for OnCall Escalation
+Parameters:
+  Domain:
+    Type: String
+    Description: Domain for the API endpoint
+  DomainCertArn:
+    Type: String
+    Description: ACM certificate ARN for Domain in us-east-1
+  Env:
+    Type: String
+    Description: API deployment stage name
+  SESDomain:
+    Type: String
+    Description: Domain for sending email
+  EscalatorAPIURI:
+    Type: String
+    Description: S3 URI for escalator api swagger
+  Route53Zone:
+    Type: String
+    Description: Route53 hosted zone ID
+
+Conditions:
+  HasDomain: !Not [ !Equals [ !Ref Domain, "" ]]
+
+Resources:
+  EscalatorBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 7
+            Status: "Enabled"
+  EscalatorBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref EscalatorBucket
+      PolicyDocument:
+        Statement:
+          -
+            Action: s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${EscalatorBucket}/*'
+            Effect: Allow
+            Principal:
+              Service: ses.amazonaws.com
+            Condition:
+              StringEquals:
+                aws:Referer: !Ref AWS::AccountId
+  EscalatorStateMachineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service: !Join [ ".", [ "states", !Ref 'AWS::Region', "amazonaws.com" ] ]
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        -
+          PolicyName: "invokelambda"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: "lambda:InvokeFunction"
+                Resource:
+                  - !GetAtt RegisterPage.Arn
+                  - !GetAtt SendPage.Arn
+                  - !GetAtt CheckAck.Arn
+  EscalatorAPIRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "allow"
+            Principal:
+              Service: "apigateway.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+      Policies:
+        -
+          PolicyName: "invokesfn"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action: 'states:StartExecution'
+                Effect: Allow
+                Resource:
+                  - !Ref EscalatorStateMachine
+        -
+          PolicyName: "ackpage"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                - 'dynamodb:UpdateItem'
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:Attributes:
+                      - ack
+                      - id
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues:
+                      - NONE
+                Effect: Allow
+                Resource:
+                  - !GetAtt PagesTable.Arn
+        -
+          PolicyName: "registerteam"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                - 'dynamodb:PutItem'
+                Effect: Allow
+                Resource:
+                  - !GetAtt TeamsTable.Arn
+  EscalatorLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "allow"
+            Principal:
+              Service: "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        -
+          PolicyName: "accessresources"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                - 'ses:SendEmail'
+                - 'ses:SendRawEmail'
+                Effect: Allow
+                Resource:
+                  - '*'
+              - Action:
+                - 'dynamodb:GetItem'
+                - 'dynamodb:PutItem'
+                - 'dynamodb:UpdateItem'
+                Effect: Allow
+                Resource:
+                  - !GetAtt PagesTable.Arn
+              - Action:
+                - 'dynamodb:GetItem'
+                Effect: Allow
+                Resource:
+                  - !GetAtt TeamsTable.Arn
+  IncomingEmailRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "allow"
+            Principal:
+              Service: "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        -
+          PolicyName: "accessresources"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                - 's3:GetBucketLocation'
+                - 's3:GetObject'
+                Effect: Allow
+                Resource:
+                  - !GetAtt EscalatorBucket.Arn
+                  - !Join
+                    - '/'
+                    - - !GetAtt EscalatorBucket.Arn
+                      - '*'
+              - Action:
+                - 'states:StartExecution'
+                Effect: Allow
+                Resource:
+                  - !Ref EscalatorStateMachine
+  PagesTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: id
+        Type: String
+      ProvisionedThroughput:
+        ReadCapacityUnits: 3
+        WriteCapacityUnits: 3
+  TeamsTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: email
+        Type: String
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+  IncomingEmail:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Runtime: python3.6
+      CodeUri: ./src
+      Handler: incomingemail.handler
+      Description:
+      MemorySize: 128
+      Timeout: 10
+      Environment:
+        Variables:
+          BODY_BUCKET: !Ref EscalatorBucket
+          BODY_PREFIX: incoming
+          SFN_ARN: !Ref EscalatorStateMachine
+      Role: !GetAtt IncomingEmailRole.Arn
+  IncomingEmailPolicy:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt IncomingEmail.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: ses.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+  RegisterPage:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Runtime: python3.6
+      CodeUri: ./src
+      Handler: registerpage.handler
+      Description:
+      MemorySize: 128
+      Timeout: 10
+      Environment:
+        Variables:
+          DDB_PAGES_TABLE: !Ref PagesTable
+          DDB_TEAMS_TABLE: !Ref TeamsTable
+          ACK_API_URL: !Sub "https://${Domain}/ack"
+      Role: !GetAtt EscalatorLambdaRole.Arn
+  SendPage:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Runtime: python3.6
+      CodeUri: ./src
+      Handler: sendpage.handler
+      Description:
+      MemorySize: 128
+      Timeout: 10
+      Environment:
+        Variables:
+          DDB_PAGES_TABLE: !Ref PagesTable
+          DDB_TEAMS_TABLE: !Ref TeamsTable
+          SES_DOMAIN: !Ref SESDomain
+      Role: !GetAtt EscalatorLambdaRole.Arn
+  CheckAck:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Runtime: python3.6
+      CodeUri: ./src
+      Handler: checkack.handler
+      Description:
+      MemorySize: 128
+      Timeout: 10
+      Environment:
+        Variables:
+          DDB_PAGES_TABLE: !Ref PagesTable
+      Role: !GetAtt EscalatorLambdaRole.Arn
+  EscalatorStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: !GetAtt EscalatorStateMachineRole.Arn
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "StartAt": "NewPage",
+              "Comment": "Escalator State Machine - Pager Escalations",
+              "States": {
+                "NewPage": {
+                  "Type": "Task",
+                  "Resource": "${RegisterPageArn}",
+                  "Next": "PageOnCall"
+                },
+                "WaitForNextCheck": {
+                  "Type": "Wait",
+                  "SecondsPath": "$.waitseconds",
+                  "Next": "CheckAck"
+                },
+                "PageOnCall": {
+                  "Type": "Task",
+                  "Resource": "${SendPageArn}",
+                  "Next": "WaitForNextCheck"
+                },
+                "CheckAck": {
+                  "Type": "Task",
+                  "Resource": "${CheckAckArn}",
+                  "Next": "Ack?"
+                },
+                "Ack?": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.ack",
+                      "BooleanEquals": false,
+                      "Next": "PageOnCall"
+                    },
+                    {
+                      "Variable": "$.ack",
+                      "BooleanEquals": true,
+                      "Next": "Done"
+                    }
+                  ]
+                },
+                "Done": {
+                  "Type": "Succeed"
+                }
+              }
+            }
+          - {
+              RegisterPageArn: !GetAtt RegisterPage.Arn,
+              SendPageArn: !GetAtt SendPage.Arn,
+              CheckAckArn: !GetAtt CheckAck.Arn
+            }
+  EscalatorAPI:
+    Type: AWS::Serverless::Api
+    DependsOn:
+      - PagesTable
+      - EscalatorStateMachine
+      - EscalatorAPIRole
+    Properties:
+      DefinitionBody:
+        'Fn::Transform':
+          Name: AWS::Include
+          Parameters:
+            Location: !Sub ${EscalatorAPIURI}
+      StageName: !Ref Env
+      Variables:
+        pagestable: !Ref PagesTable
+        teamstable: !Ref TeamsTable
+        sfnescalator: !Ref EscalatorStateMachine
+        domain: !If [ HasDomain, !Ref Domain, "testdomain.null" ]
+  EscalatorAPIDomain:
+    Type: AWS::ApiGateway::DomainName
+    Condition: HasDomain
+    Properties:
+      DomainName: !Ref Domain
+      CertificateArn: !Ref DomainCertArn
+  EscalatorAPIMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Condition: HasDomain
+    Properties:
+      Stage: !Ref Env
+      DomainName: !Ref EscalatorAPIDomain
+      RestApiId: !Ref EscalatorAPI
+  R53RecordSet:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDomain
+    Properties:
+      Name: !Sub '${Domain}.'
+      AliasTarget:
+        DNSName: !GetAtt EscalatorAPIDomain.DistributionDomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+      HostedZoneId: !Ref Route53Zone
+      Type: A
+
+Outputs:
+  StepFunctionsArn:
+    Value: !Ref EscalatorStateMachine
+  IncomingEmailARN:
+    Value: !GetAtt IncomingEmail.Arn
+  EscalatorBucket:
+    Value: !Ref EscalatorBucket
+  ApiUrl:
+    Description: URL of your API endpoint
+    Value: !If
+      - HasDomain
+      - !Sub "https://${Domain}/"
+      - !Sub "https://${EscalatorAPI}.execute-api.${AWS::Region}.amazonaws.com/${Env}"
